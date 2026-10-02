@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AlertPower</string>
+    <string name="accessibility_label">AlertPower</string>
+    <string name="accessibility_description">Lets AlertPower act as your power button through the alert slider: turn the screen off, open the power menu, restart the phone, and handle the accessibility button and its own floating button. It only looks at the power menu while a restart you requested is in progress and never reads other screen content.</string>
+
+    <string name="notif_channel">AlertPower service</string>
+    <string name="notif_title">AlertPower is armed</string>
+    <string name="notif_text">Screen off: move the slider to wake. Screen on: flick and return to turn off</string>
+    <string name="notif_action_test">Test wake</string>
+    <string name="notif_action_stop">Pause</string>
+</resources>
