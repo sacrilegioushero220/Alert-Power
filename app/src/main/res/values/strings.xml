@@ -2,11 +2,15 @@
 <resources>
     <string name="app_name">AlertPower</string>
     <string name="accessibility_label">AlertPower</string>
-    <string name="accessibility_description">Lets AlertPower act as your power button through the alert slider: turn the screen off, open the power menu, restart the phone, and handle the accessibility button and its own floating button. It only looks at the power menu while a restart you requested is in progress and never reads other screen content.</string>
+    <string name="accessibility_description">Lets AlertPower act as your power button through the alert slider: turn the screen off, open the power menu, restart the phone, and handle the accessibility button and its own floating button. It only looks at the power menu while a restart you requested is in progress. Otherwise it only notes the name of the app in front, so it can turn itself off for payment apps, and never reads screen content.</string>
 
     <string name="notif_channel">AlertPower service</string>
     <string name="notif_title">AlertPower is armed</string>
     <string name="notif_text">Screen off: move the slider to wake. Screen on: flick and return to turn off</string>
+    <string name="notif_text_paused">Paused for %1$s. Slider wake still works. Tap Pay mode to resume.</string>
+    <string name="notif_action_pay">Pay mode</string>
     <string name="notif_action_test">Test wake</string>
-    <string name="notif_action_stop">Pause</string>
+    <string name="notif_action_stop">Turn off</string>
+
+    <string name="tile_label">AlertPower pay mode</string>
 </resources>

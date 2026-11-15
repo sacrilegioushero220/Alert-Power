@@ -31,6 +31,7 @@ import kotlinx.coroutines.launch
 
 private const val SCREEN_HOME = "home"
 private const val SCREEN_SETUP = "setup"
+private const val SCREEN_APPS = "apps"
 
 @Composable
 fun AlertPowerApp(state: AppState, actions: AppActions) {
@@ -40,7 +41,7 @@ fun AlertPowerApp(state: AppState, actions: AppActions) {
     val scope = rememberCoroutineScope()
     val message: (String) -> Unit = { text -> scope.launch { snackbarHostState.showSnackbar(text) } }
 
-    BackHandler(enabled = screen == SCREEN_SETUP) { screen = SCREEN_HOME }
+    BackHandler(enabled = screen != SCREEN_HOME) { screen = SCREEN_HOME }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -50,7 +51,7 @@ fun AlertPowerApp(state: AppState, actions: AppActions) {
         AnimatedContent(
             targetState = screen,
             transitionSpec = {
-                val forward = targetState == SCREEN_SETUP
+                val forward = targetState != SCREEN_HOME
                 val enter = slideInHorizontally { full -> if (forward) full / 5 else -full / 5 } + fadeIn()
                 val exit = slideOutHorizontally { full -> if (forward) -full / 5 else full / 5 } + fadeOut()
                 enter togetherWith exit
@@ -63,12 +64,20 @@ fun AlertPowerApp(state: AppState, actions: AppActions) {
                     actions = actions,
                     contentPadding = padding,
                     onBack = { screen = SCREEN_HOME },
+                    onMessage = message,
+                )
+                SCREEN_APPS -> AppPickerScreen(
+                    state = state,
+                    actions = actions,
+                    contentPadding = padding,
+                    onBack = { screen = SCREEN_HOME },
                 )
                 else -> HomeScreen(
                     state = state,
                     actions = actions,
                     contentPadding = padding,
                     onOpenSetup = { screen = SCREEN_SETUP },
+                    onOpenApps = { screen = SCREEN_APPS },
                     onRestart = { showRestartDialog = true },
                     onMessage = message,
                 )

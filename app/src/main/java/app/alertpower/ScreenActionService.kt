@@ -16,6 +16,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.inputmethod.InputMethodManager
 import androidx.core.content.ContextCompat
 
 /**
@@ -36,7 +37,15 @@ import androidx.core.content.ContextCompat
  *    reports taps, so tap = screen off and double tap = power menu.
  *  - AlertPower's own floating button ([FloatingButton]): tap = screen off, hold = power menu.
  *
- * Window content is only inspected while a restart requested by the user is in progress.
+ * Pay mode ([PaymentPause]): payment apps such as Paytm refuse to run while this service is
+ * enabled, so when a payment app comes to the front the service turns itself off
+ * ([disableSelfNow]) and is turned back on afterwards. While paused, a slider gesture can
+ * "borrow" the service: it is enabled with a pending action ([requestPending]) that the new
+ * instance performs right after it connects, then it is turned off again.
+ *
+ * Privacy rule: outside a restart hunt, the only thing this service reads from an event is the
+ * package name of the newly focused window (to recognise a payment app). Window content is
+ * only inspected while a restart requested by the user is in progress.
  *
  * GLOBAL_ACTION_LOCK_SCREEN is used instead of DevicePolicyManager.lockNow() on purpose:
  * lockNow() forces PIN entry and disables biometrics on the next unlock.
@@ -54,6 +63,11 @@ class ScreenActionService : AccessibilityService() {
         private const val BLIND_SWIPE_AFTER_MS = 1_800L
         /** Second tap on the system accessibility button within this = power menu. */
         private const val DOUBLE_TAP_MS = 400L
+        /** A borrowed action is dropped if the service takes longer than this to bind. */
+        private const val PENDING_MAX_AGE_MS = 5_000L
+        /** Let the freshly bound service settle before performing the borrowed action. */
+        private const val PENDING_DELAY_MS = 150L
+        private const val SYSTEM_UI = "com.android.systemui"
 
         private val RESTART_WORDS = listOf("restart", "reboot")
         private val FORBIDDEN_WORDS = listOf(
@@ -72,6 +86,35 @@ class ScreenActionService : AccessibilityService() {
             instance?.performGlobalAction(GLOBAL_ACTION_POWER_DIALOG) ?: false
 
         fun restartPhone(): Boolean = instance?.beginRestart() ?: false
+
+        // ---- pay mode ----
+
+        /** Action the next instance performs right after it connects (a pay mode "borrow"). */
+        @Volatile
+        private var pending: PaymentPause.Action? = null
+        @Volatile
+        private var pendingAt = 0L
+
+        /** Turns the running service off (no permission needed). False when it is not running. */
+        fun disableSelfNow(): Boolean {
+            val s = instance ?: return false
+            Log.i(TAG, "disableSelf (pay mode)")
+            s.disableSelf()
+            // The unbind arrives on the looper a moment later; drop the instance now so nothing
+            // that runs in between (a second tile tap, restore()) sees a service that is going away.
+            s.tearDown()
+            return true
+        }
+
+        fun requestPending(action: PaymentPause.Action) {
+            pending = action
+            pendingAt = SystemClock.uptimeMillis()
+        }
+
+        fun clearPending() {
+            pending = null
+            pendingAt = 0L
+        }
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -87,6 +130,10 @@ class ScreenActionService : AccessibilityService() {
     private var buttonCallback: AccessibilityButtonController.AccessibilityButtonCallback? = null
     private var pendingButtonTap: Runnable? = null
     private var lastButtonTap = 0L
+
+    // ---- pay mode ----
+    /** Keyboards draw their own windows on top of the app in front; their package is not "the app in front". */
+    private var imePackages: Set<String> = emptySet()
 
     // ---- own floating button ----
     private var floatingButton: FloatingButton? = null
@@ -142,7 +189,39 @@ class ScreenActionService : AccessibilityService() {
         screenReceiverRegistered = true
         Prefs.get(this).registerOnSharedPreferenceChangeListener(prefListener)
         syncFloatingButton()
+        imePackages = try {
+            getSystemService(InputMethodManager::class.java).enabledInputMethodList.map { it.packageName }.toSet()
+        } catch (_: Exception) {
+            emptySet()
+        }
         Log.i(TAG, "connected")
+        // Pay mode: a pending borrow is ours; otherwise, if we were paused, the user turned the
+        // service on by hand and the pause is over.
+        if (!consumePending()) PaymentPause.onEnabledExternally(this)
+        PaymentPause.notifyStateChanged(this)
+    }
+
+    /** Pay mode borrow: the service was turned on for one action, do it and hand it back. True when there was one. */
+    private fun consumePending(): Boolean {
+        val action = pending ?: return false
+        val age = SystemClock.uptimeMillis() - pendingAt
+        clearPending()
+        if (age > PENDING_MAX_AGE_MS) {
+            // Too late to surprise the user with it, but still let PaymentPause pause again.
+            Log.w(TAG, "pending $action is ${age}ms old, dropped")
+            PaymentPause.onBorrowedActionDone(this, action)
+            return true
+        }
+        handler.postDelayed({
+            Log.i(TAG, "borrowed for $action")
+            when (action) {
+                PaymentPause.Action.LOCK -> performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+                PaymentPause.Action.POWER_DIALOG -> performGlobalAction(GLOBAL_ACTION_POWER_DIALOG)
+                PaymentPause.Action.RESTART -> beginRestart()
+            }
+            PaymentPause.onBorrowedActionDone(this, action)
+        }, PENDING_DELAY_MS)
+        return true
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -170,10 +249,13 @@ class ScreenActionService : AccessibilityService() {
         Prefs.get(this).unregisterOnSharedPreferenceChangeListener(prefListener)
         buttonCallback?.let { accessibilityButtonController.unregisterAccessibilityButtonCallback(it) }
         buttonCallback = null
+        PaymentPause.notifyStateChanged(this)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || SystemClock.uptimeMillis() > huntUntil) return
+        if (event == null) return
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) noteTopApp(event)
+        if (SystemClock.uptimeMillis() > huntUntil) return
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) {
@@ -184,6 +266,18 @@ class ScreenActionService : AccessibilityService() {
     }
 
     override fun onInterrupt() = Unit
+
+    /**
+     * Pay mode: hands the package name of the newly focused window to [PaymentPause], which
+     * turns this service off when it is a payment app. Only the package name is read, never
+     * the window's content.
+     */
+    private fun noteTopApp(event: AccessibilityEvent) {
+        val pkg = event.packageName?.toString() ?: return
+        if (pkg == packageName || pkg == SYSTEM_UI || pkg in imePackages) return
+        if (!Prefs.autoPause(this)) return
+        PaymentPause.onTopApp(this, pkg)
+    }
 
     // ---------------------------------------------------------------- buttons
 

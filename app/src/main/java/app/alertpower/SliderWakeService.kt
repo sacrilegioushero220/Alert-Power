@@ -9,6 +9,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.os.Build
@@ -37,6 +39,12 @@ import androidx.core.content.ContextCompat
  *   screen on, 3+ moves                  -> power menu
  *
  * A "gesture" ends when no move arrives for GESTURE_SETTLE_MS.
+ *
+ * Pay mode ([PaymentPause]): this service also owns the [ForegroundWatcher] that notices, without
+ * accessibility, which app is in front, so the accessibility service can be paused for payment
+ * apps and restored afterwards. It polls only while the screen is on, auto-pause is enabled and
+ * there is at least one app to watch for. While the accessibility service is paused, the
+ * screen-off and power-menu gestures borrow it for one action; the slider wake never needed it.
  */
 class SliderWakeService : Service() {
 
@@ -47,6 +55,12 @@ class SliderWakeService : Service() {
         const val ACTION_START = "app.alertpower.action.START"
         const val ACTION_STOP = "app.alertpower.action.STOP"
         const val ACTION_TEST_WAKE = "app.alertpower.action.TEST_WAKE"
+        const val ACTION_PAY_MODE = "app.alertpower.action.PAY_MODE"
+        /** Re-evaluate the foreground watcher, e.g. after a permission was granted while running. */
+        const val ACTION_SYNC = "app.alertpower.action.SYNC"
+        /** How long to wait for a restored service to bind before giving up on a test wake. */
+        private const val REBIND_POLL_MS = 100L
+        private const val REBIND_MAX_POLLS = 30
 
         /** Two broadcasts closer than this are one physical move. */
         private const val MIN_MOVE_SPACING_MS = 150L
@@ -72,6 +86,16 @@ class SliderWakeService : Service() {
         fun testWake(ctx: Context) {
             ctx.startService(Intent(ctx, SliderWakeService::class.java).setAction(ACTION_TEST_WAKE))
         }
+
+        /** Asks a running service to re-check whether the foreground watcher should run. No-op when stopped. */
+        fun sync(ctx: Context) {
+            if (!running) return
+            try {
+                ctx.startService(Intent(ctx, SliderWakeService::class.java).setAction(ACTION_SYNC))
+            } catch (e: Exception) {
+                Log.w(TAG, "sync failed", e)
+            }
+        }
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -85,6 +109,13 @@ class SliderWakeService : Service() {
 
     private val settleRunnable = Runnable { onGestureSettled() }
 
+    // ---- pay mode ----
+    private lateinit var watcher: ForegroundWatcher
+    private val pauseListener: () -> Unit = { onPauseStateChanged() }
+    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == Prefs.KEY_AUTO_PAUSE || key == Prefs.KEY_PAUSE_PACKAGES) syncWatcher()
+    }
+
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             // RINGER_MODE_CHANGED is sticky: the current value is replayed at registration.
@@ -92,6 +123,15 @@ class SliderWakeService : Service() {
             when (intent.action) {
                 AudioManager.RINGER_MODE_CHANGED_ACTION,
                 NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED -> onSliderBroadcast()
+            }
+        }
+    }
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SCREEN_OFF -> stopWatcher()
+                Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT -> syncWatcher()
             }
         }
     }
@@ -113,6 +153,20 @@ class SliderWakeService : Service() {
         }
         // Both actions are protected system broadcasts, so exporting the receiver is safe.
         ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
+
+        // Pay mode: watch the foreground app while the screen is on, follow pause changes.
+        watcher = ForegroundWatcher(this) { pkg -> PaymentPause.onTopApp(this, pkg) }
+        val screenFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
+        ContextCompat.registerReceiver(this, screenReceiver, screenFilter, ContextCompat.RECEIVER_EXPORTED)
+        Prefs.get(this).registerOnSharedPreferenceChangeListener(prefListener)
+        PaymentPause.addListener(pauseListener)
+        PaymentPause.ensureArmed(this)
+        syncWatcher()
+
         running = true
         Log.i(TAG, "started, initial state=$lastState")
     }
@@ -126,6 +180,11 @@ class SliderWakeService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_TEST_WAKE -> runTestWake()
+            ACTION_PAY_MODE -> togglePayMode()
+            ACTION_SYNC -> {
+                syncWatcher()
+                PaymentPause.ensureArmed(this)
+            }
             else -> Prefs.setServiceEnabled(this, true)
         }
         return START_STICKY
@@ -138,9 +197,64 @@ class SliderWakeService : Service() {
             unregisterReceiver(receiver)
         } catch (_: IllegalArgumentException) {
         }
+        try {
+            unregisterReceiver(screenReceiver)
+        } catch (_: IllegalArgumentException) {
+        }
+        Prefs.get(this).unregisterOnSharedPreferenceChangeListener(prefListener)
+        PaymentPause.removeListener(pauseListener)
+        stopWatcher()
         testWakeLock?.let { if (it.isHeld) it.release() }
         Log.i(TAG, "stopped")
         super.onDestroy()
+    }
+
+    // ---------------------------------------------------------------- pay mode
+
+    /**
+     * Polls the foreground app only while the screen is on, auto-pause has something to watch for and
+     * the service could be restored afterwards (WRITE_SECURE_SETTINGS granted).
+     */
+    private fun syncWatcher() {
+        val want = ScreenWaker.isScreenOn(this) && Prefs.autoPause(this) &&
+            Prefs.pausePackages(this).isNotEmpty() && A11yToggle.canWrite(this)
+        if (want) watcher.start() else watcher.stop()
+        PaymentPause.watcherActive = watcher.running
+    }
+
+    private fun stopWatcher() {
+        if (::watcher.isInitialized) watcher.stop()
+        PaymentPause.watcherActive = false
+    }
+
+    /** Notification action "Pay mode": pause now, or resume if paused. */
+    private fun togglePayMode() {
+        val ok = PaymentPause.toggle(this)
+        Log.i(TAG, "pay mode toggled -> ok=$ok paused=${PaymentPause.isPaused(this)}")
+        if (!ok) {
+            Toast.makeText(this, "Could not turn the service back on. Finish the adb setup in AlertPower.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun onPauseStateChanged() {
+        if (!running) return
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification())
+    }
+
+    /** Pay mode: the accessibility service is off on purpose, turn it on for this one action. */
+    private fun borrowOrToast(action: PaymentPause.Action) {
+        if (PaymentPause.borrow(this, action)) return
+        Toast.makeText(this, "AlertPower is paused for payments", Toast.LENGTH_SHORT).show()
+    }
+
+    /** App label for the notification while paused; falls back to the stored value. */
+    private fun pausedLabel(): String {
+        val raw = Prefs.pausedFor(this) ?: return "payments"
+        return try {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(raw, 0)).toString()
+        } catch (_: PackageManager.NameNotFoundException) {
+            if (raw == "manual") "payments" else raw
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -188,16 +302,20 @@ class SliderWakeService : Service() {
     private fun onGestureSettled() {
         val count = moveCount
         moveCount = 0
+        // Pay mode: the accessibility service is off because AlertPower paused it; borrow it.
+        val paused = !ScreenActionService.isRunning && PaymentPause.isPaused(this)
         when {
             count >= 3 -> {
                 if (!Prefs.sliderPowerMenu(this)) return
-                Log.i(TAG, "gesture: $count moves -> power menu")
-                if (!ScreenActionService.powerDialog()) needAccessibility()
+                Log.i(TAG, "gesture: $count moves -> power menu${if (paused) " (paused, borrowing)" else ""}")
+                if (paused) borrowOrToast(PaymentPause.Action.POWER_DIALOG)
+                else if (!ScreenActionService.powerDialog()) needAccessibility()
             }
             count == 2 -> {
                 if (!Prefs.sliderLock(this)) return
-                Log.i(TAG, "gesture: flick and return -> screen off")
-                if (!ScreenActionService.lockScreen()) needAccessibility()
+                Log.i(TAG, "gesture: flick and return -> screen off${if (paused) " (paused, borrowing)" else ""}")
+                if (paused) borrowOrToast(PaymentPause.Action.LOCK)
+                else if (!ScreenActionService.lockScreen()) needAccessibility()
             }
             else -> Log.d(TAG, "gesture: single move, left to the system")
         }
@@ -209,6 +327,24 @@ class SliderWakeService : Service() {
 
     /** Locks the screen through the accessibility service, then wakes it 8 s later. */
     private fun runTestWake() {
+        if (PaymentPause.isPaused(this) && PaymentPause.restore(this)) {
+            // Pay mode: the service was paused; it is enabled again now, wait for it to bind.
+            Log.i(TAG, "test wake: service was paused, restored it first")
+            waitForServiceThenTest(0)
+            return
+        }
+        doTestWake()
+    }
+
+    private fun waitForServiceThenTest(polls: Int) {
+        if (ScreenActionService.isRunning || polls >= REBIND_MAX_POLLS) {
+            doTestWake()
+        } else {
+            handler.postDelayed({ waitForServiceThenTest(polls + 1) }, REBIND_POLL_MS)
+        }
+    }
+
+    private fun doTestWake() {
         val pm = getSystemService(PowerManager::class.java)
         testWakeLock?.let { if (it.isHeld) it.release() }
         val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "alertpower:test")
@@ -243,11 +379,21 @@ class SliderWakeService : Service() {
         val stop = PendingIntent.getService(
             this, 2, Intent(this, SliderWakeService::class.java).setAction(ACTION_STOP), flags
         )
+        val pay = PendingIntent.getService(
+            this, 3, Intent(this, SliderWakeService::class.java).setAction(ACTION_PAY_MODE), flags
+        )
+        val text = if (PaymentPause.isPaused(this)) {
+            getString(R.string.notif_text_paused, pausedLabel())
+        } else {
+            getString(R.string.notif_text)
+        }
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(getString(R.string.notif_title))
-            .setContentText(getString(R.string.notif_text))
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setContentIntent(open)
+            .addAction(0, getString(R.string.notif_action_pay), pay)
             .addAction(0, getString(R.string.notif_action_test), test)
             .addAction(0, getString(R.string.notif_action_stop), stop)
             .setOngoing(true)

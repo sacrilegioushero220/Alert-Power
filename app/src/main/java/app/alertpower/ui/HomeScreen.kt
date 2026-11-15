@@ -1,10 +1,14 @@
 package app.alertpower.ui
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,17 +19,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Adjust
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Lock
-import androidx.compose.material.icons.rounded.Adjust
-import androidx.compose.material.icons.rounded.TouchApp
-import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.PowerSettingsNew
+import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Science
+import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -34,8 +40,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -50,6 +58,7 @@ fun HomeScreen(
     actions: AppActions,
     contentPadding: PaddingValues,
     onOpenSetup: () -> Unit,
+    onOpenApps: () -> Unit,
     onRestart: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
@@ -78,6 +87,10 @@ fun HomeScreen(
         Spacer(Modifier.height(18.dp))
 
         HeroCard(state = state, actions = actions, onOpenSetup = onOpenSetup)
+
+        SectionTitle("Payments")
+        PayModeCard(state = state, actions = actions, onOpenSetup = onOpenSetup)
+        PaymentAppsCard(state = state, actions = actions, onOpenApps = onOpenApps, onMessage = onMessage)
 
         SectionTitle("Gestures")
         GestureCard(
@@ -160,12 +173,15 @@ fun HomeScreen(
     }
 }
 
+/** Master switch and status ring. Three states: paused for a payment, setup needed, armed / off. */
 @Composable
 private fun HeroCard(state: AppState, actions: AppActions, onOpenSetup: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     val armed = state.serviceRunning
+    val paused = state.a11yPaused
     val accent by animateColorAsState(
         targetValue = when {
+            paused -> cs.tertiary
             !state.setupComplete -> cs.secondary
             armed -> cs.primary
             else -> cs.outline
@@ -173,9 +189,11 @@ private fun HeroCard(state: AppState, actions: AppActions, onOpenSetup: () -> Un
         label = "accent",
     )
     val (title, subtitle) = when {
+        paused -> "Paused for payments" to
+            (state.pausedFor?.let { "$it is open. Slider wake still works." } ?: "Paused by hand. Slider wake still works.")
         !state.setupComplete -> "Setup needed" to "${state.requiredStepsLeft} required step${if (state.requiredStepsLeft == 1) "" else "s"} left"
         armed -> "Armed" to "Watching the alert slider"
-        else -> "Paused" to "Turn on to use the slider as power"
+        else -> "Off" to "Turn on to use the slider as power"
     }
 
     Box(
@@ -190,7 +208,7 @@ private fun HeroCard(state: AppState, actions: AppActions, onOpenSetup: () -> Un
             Row(verticalAlignment = Alignment.CenterVertically) {
                 PulseRing(active = armed, color = accent) {
                     Icon(
-                        Icons.Rounded.PowerSettingsNew,
+                        if (paused) Icons.Rounded.Payments else Icons.Rounded.PowerSettingsNew,
                         contentDescription = null,
                         tint = accent,
                         modifier = Modifier.size(32.dp),
@@ -203,13 +221,168 @@ private fun HeroCard(state: AppState, actions: AppActions, onOpenSetup: () -> Un
                 }
                 Switch(checked = armed, onCheckedChange = actions::setServiceEnabled)
             }
-            if (!state.setupComplete) {
+            if (paused) {
                 Spacer(Modifier.height(16.dp))
+                FilledTonalButton(onClick = actions::resumeFromPause, modifier = Modifier.fillMaxWidth(), shape = CardShape) {
+                    Icon(Icons.Rounded.PowerSettingsNew, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Resume now")
+                }
+            }
+            if (!state.setupComplete) {
+                Spacer(Modifier.height(if (paused) 8.dp else 16.dp))
                 FilledTonalButton(onClick = onOpenSetup, modifier = Modifier.fillMaxWidth(), shape = CardShape) {
                     Icon(Icons.Rounded.Tune, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Finish setup")
                 }
+            }
+        }
+    }
+}
+
+/** Pay mode: explanation, adb-setup warning, auto-pause switch, pause/resume and tile buttons. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PayModeCard(state: AppState, actions: AppActions, onOpenSetup: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    val active = state.a11yPaused || state.autoPause
+    Surface(shape = CardShape, color = cs.surfaceContainer, modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconTile(
+                    icon = Icons.Rounded.Payments,
+                    container = if (active) cs.tertiaryContainer else cs.surfaceContainerHigh,
+                    content = if (active) cs.onTertiaryContainer else cs.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Pay mode", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Paytm and other payment apps refuse to run while AlertPower's accessibility service is on. " +
+                            "Pay mode turns it off while you pay and back on after.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant,
+                    )
+                }
+            }
+            if (!state.canToggleA11y) {
+                Spacer(Modifier.height(12.dp))
+                InlineWarning(
+                    text = "One-time adb setup needed. Without it AlertPower can turn the service off but not back on.",
+                    actionLabel = "Set up",
+                    onAction = onOpenSetup,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Pause automatically when a payment app opens",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = cs.onSurface,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                Switch(checked = state.autoPause, onCheckedChange = actions::setAutoPause)
+            }
+            if (!state.usageAccessGranted) {
+                TextButton(
+                    onClick = actions::openUsageAccessSettings,
+                    contentPadding = PaddingValues(horizontal = 4.dp),
+                ) { Text("Allow usage access") }
+            }
+            Spacer(Modifier.height(10.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (state.a11yPaused) {
+                    FilledTonalButton(onClick = actions::resumeFromPause, shape = CircleShape) { Text("Resume") }
+                } else {
+                    FilledTonalButton(
+                        onClick = actions::pauseForPayment,
+                        shape = CircleShape,
+                        enabled = state.accessibilityOn,
+                    ) { Text("Pause now") }
+                }
+                OutlinedButton(onClick = actions::requestQsTile, shape = CircleShape) { Text("Add quick settings tile") }
+            }
+        }
+    }
+}
+
+/** "Open through AlertPower": one chip per selected payment app, plus the app picker link. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PaymentAppsCard(
+    state: AppState,
+    actions: AppActions,
+    onOpenApps: () -> Unit,
+    onMessage: (String) -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    Surface(shape = CardShape, color = cs.surfaceContainer, modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Text("Open through AlertPower", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Opening a payment app from here turns the service off first, so the app's own check passes.",
+                style = MaterialTheme.typography.bodySmall,
+                color = cs.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            if (state.paymentApps.isEmpty()) {
+                Text(
+                    "No payment apps selected yet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = cs.onSurfaceVariant,
+                )
+            } else {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (app in state.paymentApps) {
+                        AppChip(
+                            app = app,
+                            onOpen = { actions.launchPaymentApp(app.pkg)?.let(onMessage) },
+                            onPin = { actions.pinPaymentShortcut(app.pkg)?.let(onMessage) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Tap to open. The pin adds a home screen shortcut that does the same.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = cs.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            TextButton(onClick = onOpenApps, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                Text("Choose apps…")
+            }
+        }
+    }
+}
+
+/** Icon + label chip that opens the app, with a small pin button for a launcher shortcut. */
+@Composable
+private fun AppChip(app: PaymentApp, onOpen: () -> Unit, onPin: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    Surface(
+        onClick = onOpen,
+        shape = CircleShape,
+        color = cs.surfaceContainerHigh,
+        border = BorderStroke(1.dp, cs.outlineVariant),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 8.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppIcon(icon = app.icon, size = 28.dp)
+            Spacer(Modifier.width(8.dp))
+            Text(app.label, style = MaterialTheme.typography.labelLarge, color = cs.onSurface, maxLines = 1)
+            IconButton(onClick = onPin, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    Icons.Rounded.PushPin,
+                    contentDescription = "Pin ${app.label} to the home screen",
+                    tint = cs.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
+                )
             }
         }
     }

@@ -15,8 +15,8 @@ android {
         applicationId = "app.alertpower"
         minSdk = 28          // GLOBAL_ACTION_LOCK_SCREEN needs Android 9
         targetSdk = 34       // matches the OnePlus 9 Pro on Android 14
-        versionCode = 6
-        versionName = "0.3.0"
+        versionCode = 7
+        versionName = "0.4.0"
     }
 
     buildTypes {

@@ -10,6 +10,7 @@ The volume buttons are left completely alone.
 | Power menu (long press) | Screen on: flick, back, flick |
 | Restart | "Restart phone" button in the app. It opens the power menu and performs the two-finger swipe up (OxygenOS) or taps Restart |
 | Screen off / power menu by button | Android's accessibility button: tap = screen off, double tap = power menu. AlertPower's own floating button: tap = screen off, press and hold = power menu |
+| Pay with Paytm etc. | Pay mode: open the payment app from AlertPower's chips, a home screen shortcut or the quick settings tile. The accessibility service is off while you pay and back on afterwards |
 | Power off | Deliberately not offered. A powered-off phone cannot be turned on without the button |
 | Hard reset / boot from off | Not possible in software |
 
@@ -49,6 +50,11 @@ Target: OnePlus 9 Pro LE2121, Android 14 (OxygenOS 14.0.0.1902).
   - `FloatingButton`, a draggable round button drawn as a `TYPE_ACCESSIBILITY_OVERLAY` window,
     which needs no extra permission. Tap = screen off, hold 500 ms = power menu, drag to move
     (snaps to the nearest side, position remembered). Hidden while the screen is off or locked.
+- `PaymentPause` (pay mode) turns `ScreenActionService` off while a payment app is open and
+  back on afterwards, see below. `ForegroundWatcher` (owned by `SliderWakeService`) polls
+  `UsageStatsManager` for the app in front while the screen is on, `PayLaunchActivity` is the
+  invisible trampoline behind the pause-then-launch chips and shortcuts, and `PayModeTile` is
+  the quick settings tile.
 - `BootReceiver` restarts the slider service after a reboot or an app update.
 - The UI (`ui/`) is Compose: a hero card with the master switch and an animated status ring,
   one card per gesture, Restart and Test actions, and a setup screen with a progress bar.
@@ -71,7 +77,7 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 
 1. Enable Developer options and USB debugging on the phone, plug it in, then:
    ```sh
-   adb install -r AlertPower-0.3.0.apk
+   adb install -r AlertPower-0.4.0.apk
    adb shell dumpsys deviceidle whitelist +app.alertpower   # battery whitelist, works over adb
    ```
    Installing through adb avoids Android 13's "restricted settings" block on accessibility.
@@ -87,9 +93,65 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 8. Tap **Restart phone**, confirm. The phone should reboot and AlertPower should be armed
    again after boot.
 
+Leave **Display over other apps** off unless the normal wake fails and you need the activity
+fallback: Google Pay refuses to run while a sideloaded app holds that permission.
+
 OxygenOS blocks `pm grant`, `appops set` and `settings put secure` over adb unless
 "Disable permission monitoring" is turned on in Developer options. With it on, all of the
 setup can be scripted.
+
+## Pay mode (Paytm and other payment apps)
+
+Paytm, Google Pay, BHIM and several Indian bank apps refuse to work while *any* accessibility
+service from a sideloaded (non-Play) app is enabled, whatever it does. `ScreenActionService` is
+such a service. Paytm 10.86 on this phone starts and scans fine but stops at the enter-amount
+screen with "Important Security Alert, Suspicious App Detected", naming AlertPower. The check is a
+checkpoint, not a lock: with the service off, "Ok, I Understand" dismisses it and the same screen
+continues. Other apps (Google Pay, reportedly) check at launch instead. The slider wake never
+needed the service, so AlertPower turns it genuinely off while you pay and back on afterwards.
+
+How it works:
+
+- **Auto-pause.** With "Pause automatically when a payment app opens" on, the accessibility
+  service turns itself off the moment it sees a selected app's window come to the front, and the
+  slider service polls the app in front every 0.5 s while the screen is on as a second pair of
+  eyes. For Paytm that is long before the amount screen, so opening it from the launcher just
+  works. Auto-pause only runs when the restore permission below is granted, otherwise you would
+  be left turning the service on in Settings by hand.
+- **Pause then launch.** The home screen also shows a chip for each selected payment app that is
+  installed. Tapping it turns the service off first and then opens the app, which also covers
+  apps that check at launch, before any watcher could react. The pin button on a chip puts the
+  same thing on your launcher as a shortcut, and AlertPower publishes long-press shortcuts for
+  up to four apps.
+- **Restore.** 4 s after a non-payment app is in front, the service is turned back on. A pause
+  that nothing is watching ends after 15 minutes. After a manual pause (tile or notification)
+  AlertPower waits up to 90 s for the payment app before an unrelated app counts as "left".
+- **Slider wake is unaffected.** While paused the hero card says "Paused for payments", the
+  notification says which app, and the quick settings tile shows "Paused". The screen-off and
+  power-menu gestures still work: the service is turned on for the one action and off again
+  right after (under a second for screen off, about 12 s for the power menu).
+- **Manual.** The notification's **Pay mode** action, the **Pay mode** quick settings tile
+  ("Add quick settings tile" on the home screen, or drag it in from the tile editor) and the
+  **Pause now / Resume** buttons all toggle the pause. Choose which apps count under
+  **Choose apps…**; the list is seeded with the known payment apps that are installed.
+
+Setup, once, from a computer. Turning the service off needs no permission; turning it back on
+and watching the foreground do:
+
+```sh
+adb shell pm grant app.alertpower android.permission.WRITE_SECURE_SETTINGS   # turn the service back on
+adb shell appops set app.alertpower GET_USAGE_STATS allow                    # or Settings > Apps > Special app access > Usage access
+```
+
+On OxygenOS both commands are refused with a permission error until Developer options >
+**Disable permission monitoring** is on. The setup screen warns about this while it is still
+off. Without the first grant, the manual pause (tile, notification, chips) still turns the
+service off, but you have to turn it on again in Settings; auto-pause stays out of the way until
+AlertPower knows it can restore.
+
+Privacy: to recognise a payment app the accessibility service now looks at the *package name*
+of newly focused windows. It never reads window content outside a restart you requested, same
+as before. The foreground watcher reads package names only as well.
 
 ## OxygenOS battery settings (important)
 

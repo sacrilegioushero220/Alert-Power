@@ -1,5 +1,6 @@
 package app.alertpower.ui
 
+import android.graphics.drawable.Drawable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -8,11 +9,13 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,6 +26,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Warning
@@ -32,16 +36,24 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import android.provider.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.drawable.toBitmap
 
 val CardShape = RoundedCornerShape(24.dp)
 
@@ -80,9 +92,18 @@ fun IconTile(icon: ImageVector, container: Color, content: Color, size: Int = 46
     }
 }
 
-/** Glowing ring that pulses outward while [active]. */
+/**
+ * Glowing ring that pulses outward while [active]. The pulse is skipped when the system's
+ * animator duration scale is 0 (Developer options or "Remove animations"), which also keeps
+ * UI automation tools from waiting forever for an idle screen.
+ */
 @Composable
 fun PulseRing(active: Boolean, color: Color, content: @Composable () -> Unit) {
+    val context = LocalContext.current
+    val animationsOn = remember {
+        Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
+    }
+    val pulsing = active && animationsOn
     val transition = rememberInfiniteTransition(label = "pulse")
     val scale by transition.animateFloat(
         initialValue = 1f, targetValue = 1.45f,
@@ -95,7 +116,7 @@ fun PulseRing(active: Boolean, color: Color, content: @Composable () -> Unit) {
         label = "fade",
     )
     Box(modifier = Modifier.size(96.dp), contentAlignment = Alignment.Center) {
-        if (active) {
+        if (pulsing) {
             Box(
                 Modifier
                     .size(64.dp)
@@ -232,6 +253,59 @@ fun WarningCard(text: String) {
             Spacer(Modifier.width(12.dp))
             Text(text, style = MaterialTheme.typography.bodySmall, color = cs.onErrorContainer)
         }
+    }
+}
+
+/** Smaller [WarningCard] for use inside another card, with an optional action button. */
+@Composable
+fun InlineWarning(text: String, actionLabel: String? = null, onAction: (() -> Unit)? = null) {
+    val cs = MaterialTheme.colorScheme
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = cs.errorContainer.copy(alpha = 0.55f),
+        border = BorderStroke(1.dp, cs.error.copy(alpha = 0.35f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(modifier = Modifier.padding(start = 14.dp, end = 6.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Warning, contentDescription = null, tint = cs.error, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                color = cs.onErrorContainer,
+                modifier = Modifier.weight(1f).padding(end = 8.dp),
+            )
+            if (actionLabel != null && onAction != null) {
+                TextButton(onClick = onAction, contentPadding = PaddingValues(horizontal = 10.dp)) {
+                    Text(actionLabel, color = cs.error)
+                }
+            }
+        }
+    }
+}
+
+/** An app's launcher icon drawn at [size]. The bitmap is rendered once per drawable and remembered. */
+@Composable
+fun AppIcon(icon: Drawable?, size: Dp, modifier: Modifier = Modifier) {
+    val px = with(LocalDensity.current) { size.roundToPx() }.coerceAtLeast(1)
+    val bitmap = remember(icon, px) {
+        icon?.let { drawable ->
+            try {
+                drawable.toBitmap(px, px).asImageBitmap()
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+    if (bitmap != null) {
+        Image(bitmap = bitmap, contentDescription = null, modifier = modifier.size(size))
+    } else {
+        Icon(
+            Icons.Rounded.Apps,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = modifier.size(size),
+        )
     }
 }
 
